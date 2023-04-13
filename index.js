@@ -1,87 +1,64 @@
 const { chromium } = require('playwright');
-const { Machine, interpret } = require('xstate');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
-const USERNAME = process.env.LINKEDIN_USERNAME || '1503palash@gmail.com';
-const PASSWORD = process.env.LINKEDIN_PASSWORD || 'Palashpalash@123';
-const ALL_POST_URL = process.env.ALL_POST_URL || 'https://www.linkedin.com/posts/google_scholarship-season-is-almost-here-our-partner-activity-7051219860227252224-XJr8?utm_source=share&utm_medium=member_desktop';
-const COMPANY_NAME = process.env.COMPANY_NAME || 'Google';
-const TIME_INTERVAL = Number.parseInt(process.env.TIME_INTERVAL) || 30000;
+(async () => {
+  const browser = await chromium.launch({ headless: false });
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
-const autoLikerMachine = Machine({
-  id: 'autoLiker',
-  initial: 'login',
-  states: {
-    login: {
-      on: {
-        LOGIN_SUCCESS: 'likePosts',
-        LOGIN_FAILURE: 'login',
-      },
-      async entry(context) {
-        const browser = await chromium.launch({ headless: false });
-        const page = await browser.newPage();
-        await page.goto('https://www.linkedin.com/checkpoint/rm/sign-in-another-account?fromSignIn=true&trk=guest_homepage-basic_nav-header-signin');
-        await page.fill('input[name="session_key"]', USERNAME);
-        await page.fill('input[name="session_password"]', PASSWORD);
-        await Promise.all([
-          page.waitForNavigation(),
-          page.click('button[type="submit"]'),
-        ]);
+  try {
+    // Access Supabase URL and API key from environment variables
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_KEY;
 
-        if (page.url() === 'https://www.linkedin.com/feed/') {
-          context.browser = browser;
-          context.page = page;
-          context.attempts = 0;
-          this.send('LOGIN_SUCCESS');
-        } else {
-          await browser.close();
-          this.send('LOGIN_FAILURE');
-        }
-      },
-    },
-    likePosts: {
-      on: {
-        NEXT_POST: 'likePosts',
-        FINISH: 'logout',
-      },
-      async entry(context) {
-        try {
-          await context.page.goto(ALL_POST_URL);
-          await context.page.click(`button[aria-label="Aimer le post de ${COMPANY_NAME}"]`);
-          console.log('New post liked');
-        } catch (error) {
-          console.log('No new post');
-        }
-        context.attempts++;
+    // Create Supabase client
+    const supabase = createClient(supabaseUrl, supabaseKey);
 
-        if (context.attempts < 3) {
-          this.send('NEXT_POST');
-        } else {
-          this.send('FINISH');
-        }
-      },
-    },
-    logout: {
-      async entry(context) {
-        await context.browser.close();
-      },
-    },
-  },
-});
+    // Fetch the latest record from the 'profile' table
+    const { data, error } = await supabase
+      .from('products')
+      .select('linkedin_session')
+      .eq('name', 'test1')
+      .limit(1);
 
-const service = interpret(autoLikerMachine);
+    if (error) throw new Error(error.message);
 
-service.onTransition((state) => {
-  console.log(`Transition: ${state.value}`);
-  if (state.done) {
-    console.log('Auto liker finished');
-    process.exit(0);
+    // Get the LinkedIn session cookie value from the fetched record
+    const sessionCookie = data[0].linkedin_session;
+
+    // Set the LinkedIn session cookie
+    await context.addCookies([{
+      name: 'li_at',
+      value: sessionCookie,
+      domain: '.linkedin.com',
+      path: '/',
+      expires: Date.now() / 1000 + 60 * 60 * 24 * 30, // 30 days from now
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+    }]);
+
+    // Navigate to the LinkedIn homepage
+    await page.goto('https://www.linkedin.com/feed/');
+
+    // Wait for the page to load
+    await page.waitForLoadState('networkidle');
+
+    // Get the URL of the post to like from the environment variables
+    const postUrl = process.env.LINKEDIN_POST_URLS || 'https://www.linkedin.com/posts/google_scholarship-season-is-almost-here-our-partner-activity-7051219860227252224-XJr8?utm_source=share&utm_medium=member_desktop';
+
+    // Navigate to the post to like
+    await page.goto(postUrl);
+
+    // Wait for the like button to appear and click it
+    await page.waitForSelector('.react-button__trigger');
+    await page.click('.react-button__trigger');
+
+    console.log('Post liked successfully!');
+  } catch (error) {
+    console.error(error);
+  } finally {
+    await browser.close();
   }
-});
-
-const startAutoLiker = () => {
-  service.send('LOGIN_SUCCESS');
-};
-
-console.log('Auto liker started');
-startAutoLiker();
-setInterval(startAutoLiker, TIME_INTERVAL);
+})();
